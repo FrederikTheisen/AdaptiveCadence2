@@ -2,70 +2,82 @@ import Toybox.Activity;
 import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.WatchUi;
+import Toybox.System;
 
 class AdaptiveCadence2View extends WatchUi.DataField {
+    // --- Configurable parameters ---
+    const MAX_WINDOW_SEC = 1200; // 20 min
+    const MIN_WINDOW_SEC = 10;   // 10 sec
+    const SLOPE_STABLE_THRESHOLD = 0.05; // rpm/sec
+    const SLOPE_CHANGE_THRESHOLD = 0.5;  // rpm/sec
+    const WINDOW_GROWTH_RATE = 5; // sec per tick
+    const WINDOW_SHRINK_RATE = 30; // sec per tick
+    const ZERO_CADENCE_IGNORE = true;
+    const CADENCE_THRESHOLD = 10; // Ignore if cadence is below this value
 
-    hidden var mValue as Numeric;
+    hidden var mCadence as Numeric;
+    hidden var mTrend as Numeric;
+    hidden var mWindowSec as Number;
+    hidden var mBuffer;
+    hidden var mLastTimestamp as Number;
+    hidden var mProfileInfo;
 
     function initialize() {
         DataField.initialize();
-        mValue = 0.0f;
+        mCadence = 0.0f;
+        mTrend = 0.0f;
+        mWindowSec = MIN_WINDOW_SEC; // Start with 1 min
+        mBuffer = new CircularBuffer(MAX_WINDOW_SEC); // Max buffer size
+        mLastTimestamp = 0;
+        mProfileInfo = Activity.getProfileInfo();
     }
 
-    // Set your layout here. Anytime the size of obscurity of
-    // the draw context is changed this will be called.
     function onLayout(dc as Dc) as Void {
-        var obscurityFlags = DataField.getObscurityFlags();
+        View.setLayout(Rez.Layouts.MainLayout(dc));
 
-        // Top left quadrant so we'll use the top left layout
-        if (obscurityFlags == (OBSCURE_TOP | OBSCURE_LEFT)) {
-            View.setLayout(Rez.Layouts.TopLeftLayout(dc));
-
-        // Top right quadrant so we'll use the top right layout
-        } else if (obscurityFlags == (OBSCURE_TOP | OBSCURE_RIGHT)) {
-            View.setLayout(Rez.Layouts.TopRightLayout(dc));
-
-        // Bottom left quadrant so we'll use the bottom left layout
-        } else if (obscurityFlags == (OBSCURE_BOTTOM | OBSCURE_LEFT)) {
-            View.setLayout(Rez.Layouts.BottomLeftLayout(dc));
-
-        // Bottom right quadrant so we'll use the bottom right layout
-        } else if (obscurityFlags == (OBSCURE_BOTTOM | OBSCURE_RIGHT)) {
-            View.setLayout(Rez.Layouts.BottomRightLayout(dc));
-
-        // Use the generic, centered layout
-        } else {
-            View.setLayout(Rez.Layouts.MainLayout(dc));
-            var labelView = View.findDrawableById("label") as Text;
-            labelView.locY = labelView.locY - 16;
-            var valueView = View.findDrawableById("value") as Text;
-            valueView.locY = valueView.locY + 7;
-        }
-
-        (View.findDrawableById("label") as Text).setText(Rez.Strings.label);
+        (View.findDrawableById("label") as Text).setText(Lang.format("adaptive_cadence", [mCadence]));
     }
 
-    // The given info object contains all the current workout information.
-    // Calculate a value and save it locally in this method.
-    // Note that compute() and onUpdate() are asynchronous, and there is no
-    // guarantee that compute() will be called before onUpdate().
     function compute(info as Activity.Info) as Void {
-        // See Activity.Info in the documentation for available information.
-        if(info has :currentHeartRate){
-            if(info.currentHeartRate != null){
-                mValue = info.currentHeartRate as Number;
-            } else {
-                mValue = 0.0f;
+        var cadence = info.currentCadence;
+        var time = info.elapsedTime / 1000.0;
+        if (cadence == null || ZERO_CADENCE_IGNORE && cadence <= CADENCE_THRESHOLD) { return; }
+        if (mProfileInfo.sport == Activity.SPORT_CYCLING) { cadence /= 2; }
+        if (time <= mLastTimestamp) { time = mLastTimestamp + 1; }
+
+        mBuffer.add([time, cadence]);
+
+        // Remove samples outside window
+        var samples = mBuffer.getSamples();
+        var cutoff = time - mWindowSec;
+        var filtered = [];
+        for (var i = 0; i < samples.size(); ++i) {
+            var sample = samples[i];
+            if (sample[0] >= cutoff) {
+                filtered.add(sample);
             }
         }
+
+        // Regression
+        var reg = RegressionUtils.computeRegression(filtered);
+        mCadence = reg["latest"];
+        mTrend = reg["slope"];
+
+        // Window adaptation
+        if ((mTrend < 0 ? -mTrend : mTrend) < SLOPE_STABLE_THRESHOLD) {
+            mWindowSec = (mWindowSec + WINDOW_GROWTH_RATE < MAX_WINDOW_SEC) ? mWindowSec + WINDOW_GROWTH_RATE : MAX_WINDOW_SEC;
+        } else if ((mTrend < 0 ? -mTrend : mTrend) > SLOPE_CHANGE_THRESHOLD) {
+            mWindowSec = (mWindowSec - WINDOW_SHRINK_RATE > MIN_WINDOW_SEC) ? mWindowSec - WINDOW_SHRINK_RATE : MIN_WINDOW_SEC;
+        }
+
+        System.println(time + "," + cadence + "," + mCadence + "," + mTrend + "," + mWindowSec);
+
+        mLastTimestamp = time;
     }
 
-    // Display the value you computed here. This will be called
-    // once a second when the data field is visible.
     function onUpdate(dc as Dc) as Void {
         // Set the background color
         (View.findDrawableById("Background") as Text).setColor(getBackgroundColor());
-
         // Set the foreground color and value
         var value = View.findDrawableById("value") as Text;
         if (getBackgroundColor() == Graphics.COLOR_BLACK) {
@@ -73,10 +85,8 @@ class AdaptiveCadence2View extends WatchUi.DataField {
         } else {
             value.setColor(Graphics.COLOR_BLACK);
         }
-        value.setText(mValue.format("%.2f"));
-
+        value.setText(mCadence.format("%.1f") + " rpm\n" + Lang.format("cadence_trend", [mTrend]));
         // Call parent's onUpdate(dc) to redraw the layout
         View.onUpdate(dc);
     }
-
 }
